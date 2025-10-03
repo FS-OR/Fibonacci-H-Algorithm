@@ -1,148 +1,262 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="ro">
 <head>
-  <meta charset="UTF-8">
-  <title>Fibonacci H Generator</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 40px; }
-    label { display: block; margin-top: 10px; }
-    input, button, textarea { margin-top: 5px; padding: 6px; width: 100%; }
-    #output { margin-top: 20px; font-weight: bold; }
-  </style>
+<meta charset="utf-8" />
+<title>Fibonacci H — per-name encrypted mapping</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:18px;}
+  input, button, textarea, select{font-size:14px;padding:8px;margin:6px 0;width:100%;}
+  label{font-weight:600;margin-top:8px;display:block;}
+  .row{max-width:1200px;margin:0 auto;overflow:auto;}
+  .split{display:grid;grid-template-columns:1fr 420px;gap:12px;align-items:start;}
+  .box{min-width:0;max-height:80vh;overflow:auto;padding:10px;background:#fafafa;border-radius:8px;border:1px solid #eee;}
+  pre{background:#f7f7f7;padding:10px;border-radius:6px;overflow:auto;}
+  .small{font-size:13px;color:#555}
+  @media (max-width:900px){ .split{grid-template-columns:1fr;} }
+  input, select, textarea, button { width: 100%; min-width: 0; }
+</style>
 </head>
 <body>
-  <h1>Fibonacci H Tokenizer</h1>
+  <div class="row">
+    <h2>Fibonacci H — per-name encryption (password-protected)</h2>
+    <p class="small">Flow: <strong>real name → SHA-256 → Fibonacci token</strong>. The name will be saved in the JSON encrypted with the password you choose (AES-GCM + PBKDF2). Only someone with the password can decrypt the name.</p>
 
-  <label>Input text:</label>
-  <input id="inputText" placeholder="ex: Popescu Ion|1975|ID12345">
+    <div class="split">
+      <div class="box">
+        <h3>Generate</h3>
+        <label>Input text (identifier — used for SHA/HMAC)</label>
+        <input id="inputText" placeholder="e.g.: Popescu Ion|1975|ID12345" />
 
-  <label>Optional password (for AES-GCM encryption):</label>
-  <input id="password" type="password">
+        <label>Name (optional — will be encrypted in the mapping if you enter a Name Password)</label>
+        <input id="nameField" placeholder="e.g.: Popescu Ion" />
 
-  <button id="btnGenerate">Generate token</button>
-  <button id="btnSave">Save mapping (JSON)</button>
-  <button id="btnLoad">Load mapping (JSON)</button>
+        <label>Password to encrypt the name (optional) — if not provided, the name will not be saved</label>
+        <input id="namePassword" placeholder="enter a password to protect the name (remember it!)" />
 
-  <div id="output"></div>
+        <label>Secret key for HMAC (optional)</label>
+        <input id="secretKey" placeholder="optional: HMAC key" />
 
-  <script>
-    // --- SHA256 digest (hex) ---
-    async function sha256Hex(str) {
-      const enc = new TextEncoder();
-      const buf = await crypto.subtle.digest("SHA-256", enc.encode(str));
-      return Array.from(new Uint8Array(buf))
-        .map(b => b.toString(16).padStart(2, "0"))
-        .join("");
+        <label>Options</label>
+        <select id="mode">
+          <option value="sha">SHA-256 (no key)</option>
+          <option value="hmac">HMAC-SHA256 (use the key above)</option>
+        </select>
+
+        <button id="btnGenerate">Generate token</button>
+
+        <label>SHA / HMAC hex</label>
+        <input id="shaHex" readonly />
+
+        <label>Fibonacci H token</label>
+        <input id="tokenOut" readonly />
+
+        <button id="btnSave">Save mapping (download JSON)</button>
+        <p class="small">The saved mapping will contain for each token: <code>{"sha": "...", "name_enc":"base64(salt+iv+ct)"}</code> if you provided a password. Keep the password safe — without it you cannot decrypt the name.</p>
+      </div>
+
+      <div class="box">
+        <h3>Recovery</h3>
+        <label>Load mapping JSON (the format above)</label>
+        <input id="fileInput" type="file" />
+
+        <label>Password to decrypt the name (if the mapping contains name_enc)</label>
+        <input id="decryptPassword" placeholder="password used to decrypt/encrypt the name" />
+
+        <button id="btnLoad">Load mapping</button>
+
+        <label>Token (select from list)</label>
+        <select id="tokenSelect" size="6" style="height:120px"></select>
+
+        <button id="btnRecover">Recover / Show</button>
+
+        <label>Result</label>
+        <pre id="recoverResult" style="height:200px"></pre>
+
+        <p class="small">Example mapping structure:</p>
+        <pre style="font-size:12px">{
+  "TokenX": { "sha": "64hex...", "name_enc": "BASE64(salt16 + iv12 + ciphertext+tag)" },
+  "TokenY": { "sha": "64hex...", "name_enc": null }
+}</pre>
+      </div>
+    </div>
+
+    <hr />
+    <label>Log</label>
+    <pre id="log" style="height:140px"></pre>
+  </div>
+
+<script>
+// Utilities
+function log(msg){ const p=document.getElementById('log'); p.textContent += msg + "\n"; p.scrollTop=p.scrollHeight; }
+function arrToB64(buf){ return btoa(String.fromCharCode(...new Uint8Array(buf))); }
+function b64ToArr(b64){ const bin=atob(b64); const a=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) a[i]=bin.charCodeAt(i); return a.buffer; }
+
+// SHA/HMAC (same as before)
+async function sha256Hex(str){ const enc=new TextEncoder(); const h=await crypto.subtle.digest('SHA-256', enc.encode(str)); return Array.from(new Uint8Array(h)).map(b=>b.toString(16).padStart(2,'0')).join(''); }
+async function hmacSha256Hex(keyStr, message){ const enc=new TextEncoder(); const keyData=enc.encode(keyStr); const cryptoKey=await crypto.subtle.importKey('raw', keyData, {name:'HMAC', hash:'SHA-256'}, false, ['sign']); const sig=await crypto.subtle.sign('HMAC', cryptoKey, enc.encode(message)); return Array.from(new Uint8Array(sig)).map(b=>b.toString(16).padStart(2,'0')).join(''); }
+
+// PBKDF2 derive (used for per-name encryption). iterations chosen high for security but still usable in browser.
+async function deriveKeyFromPassword(password, salt, iterations=200000){
+  const enc=new TextEncoder();
+  const baseKey = await crypto.subtle.importKey('raw', enc.encode(password), {name:'PBKDF2'}, false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({name:'PBKDF2', salt: salt, iterations: iterations, hash:'SHA-256'}, baseKey, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+  return key;
+}
+
+// Encrypt a name with a password -> returns base64(salt16 + iv12 + ct+tag)
+async function encryptNameWithPassword(name, password){
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKeyFromPassword(password, salt, 200000);
+  const enc = new TextEncoder();
+  const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv: iv}, key, enc.encode(name));
+  const combined = new Uint8Array(salt.byteLength + iv.byteLength + ct.byteLength);
+  combined.set(salt, 0);
+  combined.set(iv, salt.byteLength);
+  combined.set(new Uint8Array(ct), salt.byteLength + iv.byteLength);
+  return arrToB64(combined.buffer);
+}
+
+// Decrypt per-name base64 blob
+async function decryptNameWithPassword(b64blob, password){
+  try{
+    const buf = b64ToArr(b64blob);
+    const u = new Uint8Array(buf);
+    if(u.length < 28) throw new Error('Blob prea mic');
+    const salt = u.slice(0,16);
+    const iv = u.slice(16,28);
+    const ct = u.slice(28);
+    const key = await deriveKeyFromPassword(password, salt, 200000);
+    const plainBuf = await crypto.subtle.decrypt({name:'AES-GCM', iv: iv}, key, ct.buffer);
+    return new TextDecoder().decode(plainBuf);
+  }catch(e){
+    throw new Error('Decryption failed: ' + e.message);
+  }
+}
+
+// Compose token (Fibonacci H) same mapping method as earlier small implementation
+const HEX_TO_LETTER = {'0':'a','1':'e','2':'i','3':'o','4':'u','5':'b','6':'c','7':'d','8':'l','9':'m','a':'n','b':'p','c':'r','d':'s','e':'t','f':'v'};
+function isVowel(ch){ return ['a','e','i','o','u'].includes(ch); }
+function isConsonant(ch){ return !isVowel(ch); }
+function buildLetterLists(hexStr){ const letters = Array.from(hexStr).map(h=>HEX_TO_LETTER[h.toLowerCase()]||'a'); const vowels = letters.filter(ch=>isVowel(ch)); const consonants = letters.filter(ch=>isConsonant(ch)); while(vowels.length<21) vowels.push('a'); while(consonants.length<13) consonants.push('x'); return {vowels, consonants}; }
+function findTwoDigits(hexStr){ for(let i=0;i<hexStr.length-1;i++){ const a=hexStr[i], b=hexStr[i+1]; if(/[0-9]/.test(a) && /[0-9]/.test(b)) return a+b; } return '00'; }
+function composeTokenFromHex(hexStr){ const {vowels, consonants}=buildLetterLists(hexStr); const name=(consonants[0]+vowels[0]+consonants[1]+vowels[2]).replace(/^\w/, c=>c.toUpperCase()); const surname=(consonants[4]+vowels[7]+consonants[12]+vowels[20]).replace(/^\w/, c=>c.toUpperCase()); const year=findTwoDigits(hexStr); return `${name} ${surname} ${year}`; }
+
+// In-memory mapping: token -> { sha:hex, name_enc: base64 or null }
+let savedMapping = {};
+
+document.getElementById('btnGenerate').addEventListener('click', async ()=>{
+  const text = document.getElementById('inputText').value.trim();
+  const nameVal = document.getElementById('nameField').value.trim();
+  const namePwd = document.getElementById('namePassword').value;
+  const key = document.getElementById('secretKey').value;
+  const mode = document.getElementById('mode').value;
+  if(!text){ alert('Enter the input text'); return; }
+  try{
+    let hex;
+    if(mode==='hmac'){
+      if(!key && !confirm('Nu ai enters cheia HMAC — rulez HMAC cu cheia goala?')) return;
+      hex = await hmacSha256Hex(key, text);
+      log('HMAC generat');
+    } else {
+      hex = await sha256Hex(text);
+      log('SHA generat');
     }
-
-    // --- simple hex->letters mapping ---
-    const HEX_TO_LETTER = {
-      '0':'a','1':'e','2':'i','3':'o','4':'u','5':'b',
-      '6':'c','7':'d','8':'l','9':'m','a':'n','b':'p',
-      'c':'r','d':'s','e':'t','f':'v'
-    };
-    function isVowel(ch){ return ['a','e','i','o','u'].includes(ch); }
-    function buildLetterLists(hexStr){
-      const letters = Array.from(hexStr).map(h => HEX_TO_LETTER[h] || 'a');
-      const vowels = letters.filter(isVowel);
-      const consonants = letters.filter(ch => !isVowel(ch));
-      while(vowels.length<21) vowels.push('a');
-      while(consonants.length<13) consonants.push('x');
-      return {vowels, consonants};
-    }
-    function findTwoDigits(hexStr){
-      for(let i=0;i<hexStr.length-1;i++){
-        const a=hexStr[i], b=hexStr[i+1];
-        if(/[0-9]/.test(a) && /[0-9]/.test(b)) return a+b;
+    document.getElementById('shaHex').value = hex;
+    const token = composeTokenFromHex(hex);
+    document.getElementById('tokenOut').value = token;
+    // encrypt name if provided + password provided
+    let name_enc = null;
+    if(nameVal && namePwd){
+      log('Encrypting name... (this may take a moment, PBKDF2 200k iterations)');
+      name_enc = await encryptNameWithPassword(nameVal, namePwd);
+      log('Name encrypted');
+    } else if(nameVal && !namePwd){
+      if(!confirm('You entered a name but did not enter a password. Do you want to save the name in plain text?')){
+        // don't save name
+      } else {
+        name_enc = "__PLAIN__:"+nameVal;
       }
-      return '00';
     }
-    function composeTokenFromHex(hexStr){
-      const {vowels, consonants} = buildLetterLists(hexStr);
-      const name = (consonants[0]+vowels[0]+consonants[1]+vowels[2])
-        .replace(/^\w/, c=>c.toUpperCase());
-      const surname = (consonants[4]+vowels[7]+consonants[12]+vowels[20])
-        .replace(/^\w/, c=>c.toUpperCase());
-      const year = findTwoDigits(hexStr);
-      return `${name} ${surname} ${year}`;
+    savedMapping[token] = { sha: hex, name_enc: name_enc };
+    log('Mapping saved in memory for token: ' + token);
+  }catch(e){
+    console.error(e); alert('Eroare: ' + e.message);
+  }
+});
+
+document.getElementById('btnSave').addEventListener('click', ()=>{
+  if(!savedMapping || Object.keys(savedMapping).length===0){ alert('Mapping gol. Genereaza cel putin un token.'); return; }
+  const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(savedMapping, null, 2));
+  const dl = document.createElement('a');
+  dl.setAttribute('href', dataStr);
+  const fname = 'fibonacci_h_mapping_with_names_' + (new Date()).toISOString().replace(/[:.]/g,'-') + '.json';
+  dl.setAttribute('download', fname);
+  document.body.appendChild(dl); dl.click(); dl.remove();
+  log('JSON download initiated: ' + fname);
+});
+
+document.getElementById('btnLoad').addEventListener('click', ()=>{
+  const fi = document.getElementById('fileInput');
+  if(!fi.files || fi.files.length===0){ alert('Select a mapping file'); return; }
+  const file = fi.files[0];
+  const reader = new FileReader();
+  reader.onload = (ev)=>{
+    try{
+      const obj = JSON.parse(ev.target.result);
+      savedMapping = obj;
+      populateTokenList(obj);
+      log('Mapping JSON loaded');
+    }catch(e){
+      alert('Invalid JSON file');
+      log('Invalid JSON: ' + e.message);
     }
+  };
+  reader.readAsText(file);
+});
 
-    // --- AES-GCM helpers ---
-    async function getKey(password, salt){
-      const enc = new TextEncoder();
-      const keyMaterial = await crypto.subtle.importKey(
-        "raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]
-      );
-      return crypto.subtle.deriveKey(
-        {name:"PBKDF2", salt:enc.encode(salt), iterations:100000, hash:"SHA-256"},
-        keyMaterial, {name:"AES-GCM", length:256}, true, ["encrypt","decrypt"]
-      );
+function populateTokenList(obj){
+  const sel = document.getElementById('tokenSelect');
+  sel.innerHTML = '';
+  Object.keys(obj).forEach(k=>{
+    const opt = document.createElement('option');
+    opt.value = k; opt.textContent = k;
+    sel.appendChild(opt);
+  });
+}
+
+document.getElementById('btnRecover').addEventListener('click', async ()=>{
+  const sel = document.getElementById('tokenSelect');
+  const token = sel.value;
+  if(!token){ alert('Select a token'); return; }
+  const entry = savedMapping[token];
+  if(!entry){ alert('Token not found'); return; }
+  const sha = entry.sha || '(none)';
+  let out = 'SHA/HMAC (hex): ' + sha + '\n';
+  const name_enc = entry.name_enc;
+  if(name_enc === null || typeof name_enc === 'undefined'){ out += 'Name: (not saved)\n'; document.getElementById('recoverResult').textContent = out; return; }
+  if(typeof name_enc === 'string' && name_enc.startsWith('__PLAIN__:')){
+    out += 'Name (plain): ' + name_enc.slice(9) + '\n(atentie: nesecurizat)\n';
+    document.getElementById('recoverResult').textContent = out; return;
+  }
+  if(typeof name_enc === 'string'){
+    const pwd = document.getElementById('decryptPassword').value;
+    if(!pwd){ alert('Enter the password to decrypt the name'); return; }
+    try{
+      const name = await decryptNameWithPassword(name_enc, pwd);
+      out += 'Name: ' + name + '\n';
+      document.getElementById('recoverResult').textContent = out;
+      log('Name decrypted for token ' + token);
+    }catch(e){
+      document.getElementById('recoverResult').textContent = 'Decryption failed: ' + e.message;
+      log('Decryption failed: ' + e.message);
     }
-    async function encrypt(text, password){
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const key = await getKey(password,"fibosalt");
-      const enc = new TextEncoder().encode(text);
-      const cipher = await crypto.subtle.encrypt({name:"AES-GCM", iv}, key, enc);
-      return {iv:Array.from(iv), data:Array.from(new Uint8Array(cipher))};
-    }
-    async function decrypt(payload, password){
-      const iv = new Uint8Array(payload.iv);
-      const data = new Uint8Array(payload.data);
-      const key = await getKey(password,"fibosalt");
-      const plain = await crypto.subtle.decrypt({name:"AES-GCM", iv}, key, data);
-      return new TextDecoder().decode(plain);
-    }
-
-    // --- Main ---
-    document.getElementById("btnGenerate").addEventListener("click", async ()=>{
-      const text = document.getElementById("inputText").value.trim();
-      if(!text){ alert("Enter some input text"); return; }
-
-      const hex = await sha256Hex(text);
-      const token = composeTokenFromHex(hex);
-
-      let outputText = "SHA-256 checksum: " + hex + "\n" +
-                       "Fibonacci H token: " + token;
-
-      const password = document.getElementById("password").value;
-      if(password){
-        const encrypted = await encrypt(text, password);
-        outputText += "\nEncrypted mapping (JSON):\n" + JSON.stringify(encrypted);
-      }
-
-      document.getElementById("output").textContent = outputText;
-    });
-
-    document.getElementById("btnSave").addEventListener("click", async ()=>{
-      const text = document.getElementById("inputText").value.trim();
-      if(!text){ alert("No input"); return; }
-      const password = document.getElementById("password").value || "default";
-      const encrypted = await encrypt(text,password);
-      const blob = new Blob([JSON.stringify(encrypted)], {type:"application/json"});
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "fib_mapping.json";
-      a.click();
-    });
-
-    document.getElementById("btnLoad").addEventListener("click", ()=>{
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = "application/json";
-      input.onchange = async e=>{
-        const file = e.target.files[0];
-        const text = await file.text();
-        const payload = JSON.parse(text);
-        const password = prompt("Enter password for decryption:");
-        try {
-          const plain = await decrypt(payload,password);
-          alert("Recovered text: " + plain);
-        } catch(err){
-          alert("Decryption failed: " + err);
-        }
-      };
-      input.click();
-    });
-  </script>
+  } else {
+    document.getElementById('recoverResult').textContent = 'Unknown name_enc format';
+  }
+});
+</script>
 </body>
 </html>
