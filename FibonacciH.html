@@ -93,11 +93,11 @@ function log(msg){ const p=document.getElementById('log'); p.textContent += msg 
 function arrToB64(buf){ return btoa(String.fromCharCode(...new Uint8Array(buf))); }
 function b64ToArr(b64){ const bin=atob(b64); const a=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) a[i]=bin.charCodeAt(i); return a.buffer; }
 
-// SHA/HMAC (same as before)
+// SHA/HMAC
 async function sha256Hex(str){ const enc=new TextEncoder(); const h=await crypto.subtle.digest('SHA-256', enc.encode(str)); return Array.from(new Uint8Array(h)).map(b=>b.toString(16).padStart(2,'0')).join(''); }
 async function hmacSha256Hex(keyStr, message){ const enc=new TextEncoder(); const keyData=enc.encode(keyStr); const cryptoKey=await crypto.subtle.importKey('raw', keyData, {name:'HMAC', hash:'SHA-256'}, false, ['sign']); const sig=await crypto.subtle.sign('HMAC', cryptoKey, enc.encode(message)); return Array.from(new Uint8Array(sig)).map(b=>b.toString(16).padStart(2,'0')).join(''); }
 
-// PBKDF2 derive (used for per-name encryption). iterations chosen high for security but still usable in browser.
+// PBKDF2 derive
 async function deriveKeyFromPassword(password, salt, iterations=200000){
   const enc=new TextEncoder();
   const baseKey = await crypto.subtle.importKey('raw', enc.encode(password), {name:'PBKDF2'}, false, ['deriveKey']);
@@ -105,7 +105,7 @@ async function deriveKeyFromPassword(password, salt, iterations=200000){
   return key;
 }
 
-// Encrypt a name with a password -> returns base64(salt16 + iv12 + ct+tag)
+// Encrypt a name with a password
 async function encryptNameWithPassword(name, password){
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -136,7 +136,7 @@ async function decryptNameWithPassword(b64blob, password){
   }
 }
 
-// Compose token (Fibonacci H) same mapping method as earlier small implementation
+// Token logic
 const HEX_TO_LETTER = {'0':'a','1':'e','2':'i','3':'o','4':'u','5':'b','6':'c','7':'d','8':'l','9':'m','a':'n','b':'p','c':'r','d':'s','e':'t','f':'v'};
 function isVowel(ch){ return ['a','e','i','o','u'].includes(ch); }
 function isConsonant(ch){ return !isVowel(ch); }
@@ -157,8 +157,7 @@ document.getElementById('btnGenerate').addEventListener('click', async ()=>{
   try{
     let hex;
     if(mode==='hmac'){
-      if(!key && !confirm('Nu ai enters cheia HMAC — rulez HMAC cu cheia goala?')) return;
-      hex = await hmacSha256Hex(key, text);
+      hex = await hmacSha256Hex(key||'', text);
       log('HMAC generat');
     } else {
       hex = await sha256Hex(text);
@@ -167,35 +166,33 @@ document.getElementById('btnGenerate').addEventListener('click', async ()=>{
     document.getElementById('shaHex').value = hex;
     const token = composeTokenFromHex(hex);
     document.getElementById('tokenOut').value = token;
-    // encrypt name if provided + password provided
+    // encrypt name if provided
     let name_enc = null;
     if(nameVal && namePwd){
-      log('Encrypting name... (this may take a moment, PBKDF2 200k iterations)');
+      log('Encrypting name...');
       name_enc = await encryptNameWithPassword(nameVal, namePwd);
       log('Name encrypted');
     } else if(nameVal && !namePwd){
-      if(!confirm('You entered a name but did not enter a password. Do you want to save the name in plain text?')){
-        // don't save name
-      } else {
+      if(confirm('Save name in plain text?')){
         name_enc = "__PLAIN__:"+nameVal;
       }
     }
     savedMapping[token] = { sha: hex, name_enc: name_enc };
-    log('Mapping saved in memory for token: ' + token);
+    log('Mapping saved: ' + token);
   }catch(e){
     console.error(e); alert('Eroare: ' + e.message);
   }
 });
 
 document.getElementById('btnSave').addEventListener('click', ()=>{
-  if(!savedMapping || Object.keys(savedMapping).length===0){ alert('Mapping gol. Genereaza cel putin un token.'); return; }
+  if(!savedMapping || Object.keys(savedMapping).length===0){ alert('Mapping gol.'); return; }
   const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(savedMapping, null, 2));
   const dl = document.createElement('a');
   dl.setAttribute('href', dataStr);
-  const fname = 'fibonacci_h_mapping_with_names_' + (new Date()).toISOString().replace(/[:.]/g,'-') + '.json';
+  const fname = 'fibonacci_h_mapping_' + (new Date()).toISOString().replace(/[:.]/g,'-') + '.json';
   dl.setAttribute('download', fname);
   document.body.appendChild(dl); dl.click(); dl.remove();
-  log('JSON download initiated: ' + fname);
+  log('JSON download: ' + fname);
 });
 
 document.getElementById('btnLoad').addEventListener('click', ()=>{
@@ -236,19 +233,22 @@ document.getElementById('btnRecover').addEventListener('click', async ()=>{
   const sha = entry.sha || '(none)';
   let out = 'SHA/HMAC (hex): ' + sha + '\n';
   const name_enc = entry.name_enc;
-  if(name_enc === null || typeof name_enc === 'undefined'){ out += 'Name: (not saved)\n'; document.getElementById('recoverResult').textContent = out; return; }
+  if(name_enc === null || typeof name_enc === 'undefined'){
+    out += 'Name: (not saved)\n';
+    document.getElementById('recoverResult').textContent = out; return;
+  }
   if(typeof name_enc === 'string' && name_enc.startsWith('__PLAIN__:')){
-    out += 'Name (plain): ' + name_enc.slice(9) + '\n(atentie: nesecurizat)\n';
+    out += 'Name (plain): ' + name_enc.slice(9) + '\n';
     document.getElementById('recoverResult').textContent = out; return;
   }
   if(typeof name_enc === 'string'){
     const pwd = document.getElementById('decryptPassword').value;
-    if(!pwd){ alert('Enter the password to decrypt the name'); return; }
+    if(!pwd){ alert('Enter password'); return; }
     try{
       const name = await decryptNameWithPassword(name_enc, pwd);
       out += 'Name: ' + name + '\n';
       document.getElementById('recoverResult').textContent = out;
-      log('Name decrypted for token ' + token);
+      log('Name decrypted: ' + token);
     }catch(e){
       document.getElementById('recoverResult').textContent = 'Decryption failed: ' + e.message;
       log('Decryption failed: ' + e.message);
