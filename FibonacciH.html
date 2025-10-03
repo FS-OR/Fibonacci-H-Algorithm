@@ -1,100 +1,148 @@
-<!doctype html>
-<html lang="ro">
+<!DOCTYPE html>
+<html lang="en">
 <head>
-<meta charset="utf-8" />
-<title>Fibonacci H — per-name encrypted mapping</title>
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<style>
-  *{box-sizing:border-box}
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:18px;}
-  input, button, textarea, select{font-size:14px;padding:8px;margin:6px 0;width:100%;}
-  label{font-weight:600;margin-top:8px;display:block;}
-  .row{max-width:1200px;margin:0 auto;overflow:auto;}
-  .split{display:grid;grid-template-columns:1fr 420px;gap:12px;align-items:start;}
-  .box{min-width:0;max-height:80vh;overflow:auto;padding:10px;background:#fafafa;border-radius:8px;border:1px solid #eee;}
-  pre{background:#f7f7f7;padding:10px;border-radius:6px;overflow:auto;}
-  .small{font-size:13px;color:#555}
-  @media (max-width:900px){ .split{grid-template-columns:1fr;} }
-  input, select, textarea, button { width: 100%; min-width: 0; }
-  .footer {margin-top:30px;padding-top:10px;border-top:1px solid #ddd;text-align:center;font-size:14px;color:#333;}
-  .footer a {margin-left:8px;display:inline-flex;align-items:center;text-decoration:none;color:#0a66c2;}
-  .footer img {width:20px;height:20px;margin-left:4px;}
-</style>
+  <meta charset="UTF-8">
+  <title>Fibonacci H Generator</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; }
+    label { display: block; margin-top: 10px; }
+    input, button, textarea { margin-top: 5px; padding: 6px; width: 100%; }
+    #output { margin-top: 20px; font-weight: bold; }
+  </style>
 </head>
 <body>
-  <div class="row">
-    <h2>Fibonacci H — per-name encryption (password-protected)</h2>
-    <p class="small">Flow: <strong>real name → SHA-256 → Fibonacci token</strong>. The name will be saved in the JSON encrypted with the password you choose (AES-GCM + PBKDF2). Only someone with the password can decrypt the name.</p>
+  <h1>Fibonacci H Tokenizer</h1>
 
-    <div class="split">
-      <div class="box">
-        <h3>Generate</h3>
-        <label>Input text (identifier — used for SHA/HMAC)</label>
-        <input id="inputText" placeholder="e.g.: Popescu Ion|1975|ID12345" />
+  <label>Input text:</label>
+  <input id="inputText" placeholder="ex: Popescu Ion|1975|ID12345">
 
-        <label>Name (optional — will be encrypted in the mapping if you enter a Name Password)</label>
-        <input id="nameField" placeholder="e.g.: Popescu Ion" />
+  <label>Optional password (for AES-GCM encryption):</label>
+  <input id="password" type="password">
 
-        <label>Password to encrypt the name (optional) — if not provided, the name will not be saved</label>
-        <input id="namePassword" placeholder="enter a password to protect the name (remember it!)" />
+  <button id="btnGenerate">Generate token</button>
+  <button id="btnSave">Save mapping (JSON)</button>
+  <button id="btnLoad">Load mapping (JSON)</button>
 
-        <label>Secret key for HMAC (optional)</label>
-        <input id="secretKey" placeholder="optional: HMAC key" />
+  <div id="output"></div>
 
-        <label>Options</label>
-        <select id="mode">
-          <option value="sha">SHA-256 (no key)</option>
-          <option value="hmac">HMAC-SHA256 (use the key above)</option>
-        </select>
+  <script>
+    // --- SHA256 digest (hex) ---
+    async function sha256Hex(str) {
+      const enc = new TextEncoder();
+      const buf = await crypto.subtle.digest("SHA-256", enc.encode(str));
+      return Array.from(new Uint8Array(buf))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+    }
 
-        <button id="btnGenerate">Generate token</button>
+    // --- simple hex->letters mapping ---
+    const HEX_TO_LETTER = {
+      '0':'a','1':'e','2':'i','3':'o','4':'u','5':'b',
+      '6':'c','7':'d','8':'l','9':'m','a':'n','b':'p',
+      'c':'r','d':'s','e':'t','f':'v'
+    };
+    function isVowel(ch){ return ['a','e','i','o','u'].includes(ch); }
+    function buildLetterLists(hexStr){
+      const letters = Array.from(hexStr).map(h => HEX_TO_LETTER[h] || 'a');
+      const vowels = letters.filter(isVowel);
+      const consonants = letters.filter(ch => !isVowel(ch));
+      while(vowels.length<21) vowels.push('a');
+      while(consonants.length<13) consonants.push('x');
+      return {vowels, consonants};
+    }
+    function findTwoDigits(hexStr){
+      for(let i=0;i<hexStr.length-1;i++){
+        const a=hexStr[i], b=hexStr[i+1];
+        if(/[0-9]/.test(a) && /[0-9]/.test(b)) return a+b;
+      }
+      return '00';
+    }
+    function composeTokenFromHex(hexStr){
+      const {vowels, consonants} = buildLetterLists(hexStr);
+      const name = (consonants[0]+vowels[0]+consonants[1]+vowels[2])
+        .replace(/^\w/, c=>c.toUpperCase());
+      const surname = (consonants[4]+vowels[7]+consonants[12]+vowels[20])
+        .replace(/^\w/, c=>c.toUpperCase());
+      const year = findTwoDigits(hexStr);
+      return `${name} ${surname} ${year}`;
+    }
 
-        <label>SHA / HMAC hex</label>
-        <input id="shaHex" readonly />
+    // --- AES-GCM helpers ---
+    async function getKey(password, salt){
+      const enc = new TextEncoder();
+      const keyMaterial = await crypto.subtle.importKey(
+        "raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]
+      );
+      return crypto.subtle.deriveKey(
+        {name:"PBKDF2", salt:enc.encode(salt), iterations:100000, hash:"SHA-256"},
+        keyMaterial, {name:"AES-GCM", length:256}, true, ["encrypt","decrypt"]
+      );
+    }
+    async function encrypt(text, password){
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const key = await getKey(password,"fibosalt");
+      const enc = new TextEncoder().encode(text);
+      const cipher = await crypto.subtle.encrypt({name:"AES-GCM", iv}, key, enc);
+      return {iv:Array.from(iv), data:Array.from(new Uint8Array(cipher))};
+    }
+    async function decrypt(payload, password){
+      const iv = new Uint8Array(payload.iv);
+      const data = new Uint8Array(payload.data);
+      const key = await getKey(password,"fibosalt");
+      const plain = await crypto.subtle.decrypt({name:"AES-GCM", iv}, key, data);
+      return new TextDecoder().decode(plain);
+    }
 
-        <label>Fibonacci H token</label>
-        <input id="tokenOut" readonly />
+    // --- Main ---
+    document.getElementById("btnGenerate").addEventListener("click", async ()=>{
+      const text = document.getElementById("inputText").value.trim();
+      if(!text){ alert("Enter some input text"); return; }
 
-        <button id="btnSave">Save mapping (download JSON)</button>
-        <p class="small">The saved mapping will contain for each token: <code>{"sha": "...", "name_enc":"base64(salt+iv+ct)"}</code> if you provided a password. Keep the password safe — without it you cannot decrypt the name.</p>
-      </div>
+      const hex = await sha256Hex(text);
+      const token = composeTokenFromHex(hex);
 
-      <div class="box">
-        <h3>Recovery</h3>
-        <label>Load mapping JSON (the format above)</label>
-        <input id="fileInput" type="file" />
+      let outputText = "SHA-256 checksum: " + hex + "\n" +
+                       "Fibonacci H token: " + token;
 
-        <label>Password to decrypt the name (if the mapping contains name_enc)</label>
-        <input id="decryptPassword" placeholder="password used to decrypt/encrypt the name" />
+      const password = document.getElementById("password").value;
+      if(password){
+        const encrypted = await encrypt(text, password);
+        outputText += "\nEncrypted mapping (JSON):\n" + JSON.stringify(encrypted);
+      }
 
-        <button id="btnLoad">Load mapping</button>
+      document.getElementById("output").textContent = outputText;
+    });
 
-        <label>Token (select from list)</label>
-        <select id="tokenSelect" size="6" style="height:120px"></select>
+    document.getElementById("btnSave").addEventListener("click", async ()=>{
+      const text = document.getElementById("inputText").value.trim();
+      if(!text){ alert("No input"); return; }
+      const password = document.getElementById("password").value || "default";
+      const encrypted = await encrypt(text,password);
+      const blob = new Blob([JSON.stringify(encrypted)], {type:"application/json"});
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "fib_mapping.json";
+      a.click();
+    });
 
-        <button id="btnRecover">Recover / Show</button>
-
-        <label>Result</label>
-        <pre id="recoverResult" style="height:200px"></pre>
-
-        <p class="small">Example mapping structure:</p>
-        <pre style="font-size:12px">{
-  "TokenX": { "sha": "64hex...", "name_enc": "BASE64(salt16 + iv12 + ciphertext+tag)" },
-  "TokenY": { "sha": "64hex...", "name_enc": null }
-}</pre>
-      </div>
-    </div>
-
-    <hr />
-    <label>Log</label>
-    <pre id="log" style="height:140px"></pre>
-
-    <div class="footer">
-      Fast Science - Open Research Project
-      <a href="https://linkedin.com/in/bogdan-marciu" target="_blank">LinkedIn
-        <img src="https://cdn-icons-png.flaticon.com/512/174/174857.png" alt="LinkedIn" />
-      </a>
-    </div>
-  </div>
+    document.getElementById("btnLoad").addEventListener("click", ()=>{
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "application/json";
+      input.onchange = async e=>{
+        const file = e.target.files[0];
+        const text = await file.text();
+        const payload = JSON.parse(text);
+        const password = prompt("Enter password for decryption:");
+        try {
+          const plain = await decrypt(payload,password);
+          alert("Recovered text: " + plain);
+        } catch(err){
+          alert("Decryption failed: " + err);
+        }
+      };
+      input.click();
+    });
+  </script>
 </body>
 </html>
